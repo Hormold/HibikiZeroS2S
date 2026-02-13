@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Local server: serves frontend + WebSocket proxy to Baseten with auth."""
 
+import asyncio
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 import websockets
 from aiohttp import web
+
+load_dotenv()
 
 BASETEN_API_KEY = os.environ.get("BASETEN_API_KEY", "")
 BASETEN_WS_URL = os.environ.get("BASETEN_WS_URL", "")
