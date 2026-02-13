@@ -9,11 +9,11 @@ Powered by [Kyutai's Hibiki Zero](https://github.com/kyutai-labs/hibiki-zero) �
 ## Architecture
 
 ```
-Browser (mic) → WebSocket → Local Proxy → Baseten (GPU) → Translated audio + text
+Browser (mic) → ws://localhost:8080/ws → proxy.py → Baseten (GPU) → Translated audio + text
 ```
 
-- **`frontend/`** — Single-file frontend with Opus encoding/decoding, waveform visualization
-- **`proxy.py`** — Local WebSocket proxy that injects Baseten auth header
+- **`frontend/`** — Frontend with Opus encoding/decoding, waveform visualization
+- **`proxy.py`** — Serves frontend + WebSocket proxy to Baseten with auth
 - **`truss/`** — Baseten Truss deployment (L4 GPU, WebSocket transport)
 
 ## Quick Start
@@ -22,25 +22,21 @@ Browser (mic) → WebSocket → Local Proxy → Baseten (GPU) → Translated aud
 
 ```bash
 pip install truss
-cp .env.example .env  # add your BASETEN_API_KEY
+cp .env.example .env  # add your BASETEN_API_KEY and BASETEN_WS_URL
 cd truss && truss push
 ```
 
-### 2. Run locally
+### 2. Run
 
 ```bash
-source .env
-export BASETEN_API_KEY
+pip install websockets aiohttp
+source .env && export BASETEN_API_KEY BASETEN_WS_URL
 
-# Start proxy (relays to Baseten with auth)
-pip install websockets
-python3 proxy.py &
-
-# Serve frontend
-python3 -m http.server 8080 -d frontend &
-
-open http://localhost:8080
+python3 proxy.py
+# → http://localhost:8080
 ```
+
+One command — serves the frontend and proxies WebSocket to Baseten.
 
 ### 3. Speak
 
