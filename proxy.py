@@ -10,10 +10,7 @@ import signal
 import websockets
 
 BASETEN_API_KEY = os.environ.get("BASETEN_API_KEY", "")
-BASETEN_WS_URL = os.environ.get(
-    "BASETEN_WS_URL",
-    "wss://model-qvvzpyrq.api.baseten.co/environments/development/websocket",
-)
+BASETEN_WS_URL = os.environ.get("BASETEN_WS_URL", "")
 LOCAL_PORT = 8765
 
 
@@ -49,8 +46,8 @@ async def proxy_handler(browser_ws):
 
 
 async def main():
-    if not BASETEN_API_KEY:
-        print("Set BASETEN_API_KEY env var")
+    if not BASETEN_API_KEY or not BASETEN_WS_URL:
+        print("Set BASETEN_API_KEY and BASETEN_WS_URL env vars")
         return
 
     print(f"[proxy] Relaying ws://localhost:{LOCAL_PORT} → {BASETEN_WS_URL}")

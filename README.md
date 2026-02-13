@@ -12,7 +12,7 @@ Powered by [Kyutai's Hibiki Zero](https://github.com/kyutai-labs/hibiki-zero) �
 Browser (mic) → WebSocket → Local Proxy → Baseten (GPU) → Translated audio + text
 ```
 
-- **`index.html`** — Single-file frontend with Opus encoding/decoding, waveform visualization
+- **`frontend/`** — Single-file frontend with Opus encoding/decoding, waveform visualization
 - **`proxy.py`** — Local WebSocket proxy that injects Baseten auth header
 - **`truss/`** — Baseten Truss deployment (L4 GPU, WebSocket transport)
 
@@ -37,7 +37,7 @@ pip install websockets
 python3 proxy.py &
 
 # Serve frontend
-python3 -m http.server 8080 &
+python3 -m http.server 8080 -d frontend &
 
 open http://localhost:8080
 ```
