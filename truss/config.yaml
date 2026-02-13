@@ -1,0 +1,29 @@
+model_name: HibikiZeroS2S
+python_version: py311
+
+requirements:
+  - moshi>=0.2.13
+  - sphn
+  - sentencepiece
+  - numpy
+  - fastapi
+
+runtime:
+  transport:
+    kind: websocket
+
+resources:
+  cpu: "4"
+  memory: 24Gi
+  use_gpu: true
+  accelerator: L4
+
+model_cache:
+  - repo_id: kyutai/hibiki-zero-3b-pytorch-bf16
+    revision: 23b3e0b41782026c81dd5283a034107b01f9e513
+    use_volume: true
+    volume_folder: /cache/hibiki-zero
+
+secrets: {}
+
+environment_variables: {}

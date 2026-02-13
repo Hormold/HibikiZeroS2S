@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hibiki Zero — S2S Translation</title>
+<script src="recorder.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .container { width: 100%; max-width: 600px; padding: 24px; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; text-align: center; }
+  .subtitle { font-size: 0.85rem; color: #888; text-align: center; margin-bottom: 32px; }
+  .status { display: flex; align-items: center; gap: 8px; justify-content: center; margin-bottom: 24px; font-size: 0.9rem; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex-shrink: 0; }
+  .dot.connecting { background: #f59e0b; animation: pulse 1s infinite; }
+  .dot.connected { background: #22c55e; }
+  .dot.streaming { background: #3b82f6; animation: pulse 0.5s infinite; }
+  .dot.error { background: #ef4444; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .btn { display: block; width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 1.1rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+  .btn-start { background: #3b82f6; color: white; }
+  .btn-start:hover { background: #2563eb; }
+  .btn-stop { background: #ef4444; color: white; }
+  .btn-stop:hover { background: #dc2626; }
+  .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .config { display: flex; gap: 12px; margin-bottom: 12px; }
+  .config label { font-size: 0.75rem; color: #666; margin-bottom: 4px; display: block; }
+  .config input { flex: 1; padding: 10px 14px; border: 1px solid #333; border-radius: 8px; background: #1a1a1a; color: #e0e0e0; font-size: 0.9rem; }
+  .config input:focus { outline: none; border-color: #3b82f6; }
+  .translation-box { margin-top: 24px; background: #1a1a1a; border-radius: 12px; padding: 20px; min-height: 120px; max-height: 300px; overflow-y: auto; }
+  .translation-box h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 12px; }
+  #translatedText { font-size: 1.1rem; line-height: 1.6; color: #f0f0f0; white-space: pre-wrap; }
+  .stats { display: flex; gap: 16px; margin-top: 16px; justify-content: center; font-size: 0.8rem; color: #666; }
+  .visualizer { display: flex; gap: 12px; margin-bottom: 24px; }
+  .viz-box { flex: 1; height: 60px; background: #1a1a1a; border-radius: 8px; overflow: hidden; position: relative; }
+  .viz-box canvas { width: 100%; height: 100%; }
+  .viz-label { position: absolute; bottom: 4px; left: 8px; font-size: 0.65rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em; }
+  .hint { font-size: 0.75rem; color: #555; text-align: center; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Hibiki Zero S2S</h1>
+  <p class="subtitle">Real-time speech translation — FR / ES / PT / DE → EN</p>
+
+  <div class="config">
+    <input id="wsUrl" type="text" value="ws://localhost:8765" />
+  </div>
+  <p class="hint">Run proxy.py to relay to Baseten with auth</p>
+
+  <div class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Ready</span>
+  </div>
+
+  <div class="visualizer">
+    <div class="viz-box">
+      <canvas id="inputViz"></canvas>
+      <span class="viz-label">Input</span>
+    </div>
+    <div class="viz-box">
+      <canvas id="outputViz"></canvas>
+      <span class="viz-label">Output</span>
+    </div>
+  </div>
+
+  <button class="btn btn-start" id="startBtn" onclick="startSession()">Start Translating</button>
+
+  <div class="translation-box">
+    <h3>Translation</h3>
+    <div id="translatedText">Speak in French, Spanish, Portuguese, or German...</div>
+  </div>
+
+  <div class="stats">
+    <span>Frames: <span id="frameCount">0</span></span>
+    <span>Buffered: <span id="buffered">-</span></span>
+  </div>
+</div>
+
+<script>
+// State
+let ws = null;
+let audioCtx = null;
+let recorder = null;
+let decoderWorker = null;
+let inputAnalyser = null;
+let outputAnalyser = null;
+let audioOutput = null;
+let frameCount = 0;
+let running = false;
+let micStream = null;
+
+// DOM
+const startBtn = document.getElementById('startBtn');
+const statusDot = document.getElementById('statusDot');
+const statusTextEl = document.getElementById('statusText');
+const translatedText = document.getElementById('translatedText');
+const frameCountEl = document.getElementById('frameCount');
+const bufferedEl = document.getElementById('buffered');
+
+function setStatus(state, text) {
+  statusDot.className = 'dot ' + state;
+  statusTextEl.textContent = text;
+}
+
+// --- Audio output via ScriptProcessorNode ---
+function createAudioOutput(ctx) {
+  const bufferQueue = [];
+  let bufferOffset = 0;
+  const scriptNode = ctx.createScriptProcessor(4096, 1, 1);
+
+  scriptNode.onaudioprocess = (e) => {
+    const output = e.outputBuffer.getChannelData(0);
+    let written = 0;
+    while (written < output.length && bufferQueue.length > 0) {
+      const buf = bufferQueue[0];
+      const remaining = buf.length - bufferOffset;
+      const toWrite = Math.min(remaining, output.length - written);
+      for (let i = 0; i < toWrite; i++) {
+        output[written + i] = buf[bufferOffset + i];
+      }
+      written += toWrite;
+      bufferOffset += toWrite;
+      if (bufferOffset >= buf.length) {
+        bufferQueue.shift();
+        bufferOffset = 0;
+      }
+    }
+    for (let i = written; i < output.length; i++) {
+      output[i] = 0;
+    }
+  };
+
+  return {
+    node: scriptNode,
+    enqueue(pcmFloat32) { bufferQueue.push(pcmFloat32); },
+    getBufferedMs() {
+      let samples = -bufferOffset;
+      for (const b of bufferQueue) samples += b.length;
+      return Math.round((samples / ctx.sampleRate) * 1000);
+    }
+  };
+}
+
+// --- Waveform visualizer ---
+function drawWaveform(canvas, analyser, color) {
+  if (!analyser) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.offsetWidth * devicePixelRatio;
+  const h = canvas.height = canvas.offsetHeight * devicePixelRatio;
+  const data = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(data);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * devicePixelRatio;
+  ctx.beginPath();
+  const step = w / data.length;
+  for (let i = 0; i < data.length; i++) {
+    const y = (data[i] / 255) * h;
+    if (i === 0) ctx.moveTo(0, y);
+    else ctx.lineTo(i * step, y);
+  }
+  ctx.stroke();
+}
+
+function animateVisualizers() {
+  if (!running) return;
+  drawWaveform(document.getElementById('inputViz'), inputAnalyser, '#22c55e');
+  drawWaveform(document.getElementById('outputViz'), outputAnalyser, '#3b82f6');
+  if (audioOutput) bufferedEl.textContent = audioOutput.getBufferedMs() + 'ms';
+  requestAnimationFrame(animateVisualizers);
+}
+
+// --- Main session ---
+async function startSession() {
+  const wsUrl = document.getElementById('wsUrl').value.trim();
+  if (!wsUrl) { alert('Enter the WebSocket URL'); return; }
+
+  running = true;
+  frameCount = 0;
+  translatedText.textContent = '';
+  startBtn.textContent = 'Stop';
+  startBtn.className = 'btn btn-stop';
+  startBtn.onclick = stopSession;
+
+  try {
+    // Microphone first (needs user gesture)
+    setStatus('connecting', 'Requesting mic...');
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true, channelCount: 1 },
+    });
+
+    // Audio context
+    audioCtx = new AudioContext();
+
+    // Input analyser
+    const micSource = audioCtx.createMediaStreamSource(micStream);
+    inputAnalyser = audioCtx.createAnalyser();
+    inputAnalyser.fftSize = 2048;
+    micSource.connect(inputAnalyser);
+
+    // Output pipeline
+    audioOutput = createAudioOutput(audioCtx);
+    audioOutput.node.connect(audioCtx.destination);
+
+    // Output analyser
+    outputAnalyser = audioCtx.createAnalyser();
+    outputAnalyser.fftSize = 2048;
+    audioOutput.node.connect(outputAnalyser);
+
+    // Decoder worker (local file)
+    decoderWorker = new Worker('decoderWorker.min.js');
+    decoderWorker.postMessage({
+      command: 'init',
+      bufferLength: Math.round((960 * audioCtx.sampleRate) / 24000),
+      decoderSampleRate: 24000,
+      outputBufferSampleRate: audioCtx.sampleRate,
+      resampleQuality: 0,
+    });
+    decoderWorker.onmessage = (e) => {
+      const frame = e.data[0];
+      if (frame && frame.length > 0) {
+        audioOutput.enqueue(frame);
+      }
+    };
+
+    // Start visualizers
+    animateVisualizers();
+
+    // WebSocket
+    setStatus('connecting', 'Connecting...');
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      setStatus('connected', 'Connected — waiting for handshake...');
+    };
+
+    ws.onerror = (e) => {
+      console.error('WS error:', e);
+      setStatus('error', 'Connection error — is proxy.py running?');
+    };
+
+    ws.onclose = (e) => {
+      console.log('WS closed:', e.code, e.reason);
+      if (running) {
+        setStatus('error', `Disconnected (${e.code})`);
+        stopSession();
+      }
+    };
+
+    ws.onmessage = (e) => {
+      const data = new Uint8Array(e.data);
+      if (data.length === 0) return;
+      const kind = data[0];
+      const payload = data.slice(1);
+
+      if (kind === 0) {
+        // Handshake — start recording
+        setStatus('streaming', 'Streaming — speak now!');
+        startRecording(micStream);
+      } else if (kind === 1) {
+        // Translated audio (Opus)
+        decoderWorker.postMessage({ command: 'decode', pages: payload });
+        frameCountEl.textContent = ++frameCount;
+      } else if (kind === 2) {
+        // Translated text
+        const text = new TextDecoder().decode(payload);
+        translatedText.textContent += text;
+        const box = translatedText.parentElement;
+        box.scrollTop = box.scrollHeight;
+      }
+    };
+
+  } catch (err) {
+    console.error(err);
+    setStatus('error', err.message);
+    stopSession();
+  }
+}
+
+function startRecording(stream) {
+  recorder = new Recorder({
+    sourceNode: audioCtx.createMediaStreamSource(stream),
+    encoderPath: 'encoderWorker.min.js',
+    bufferLength: Math.round((960 * audioCtx.sampleRate) / 24000),
+    encoderFrameSize: 20,
+    encoderSampleRate: 24000,
+    maxFramesPerPage: 2,
+    numberOfChannels: 1,
+    recordingGain: 1,
+    resampleQuality: 3,
+    encoderComplexity: 0,
+    encoderApplication: 2049, // VOIP
+    streamPages: true,
+  });
+
+  recorder.ondataavailable = (opusData) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const msg = new Uint8Array(opusData.length + 1);
+    msg[0] = 1;
+    msg.set(new Uint8Array(opusData), 1);
+    ws.send(msg.buffer);
+  };
+
+  recorder.start().catch((err) => {
+    console.error('Recorder error:', err);
+    setStatus('error', 'Mic recording failed');
+  });
+}
+
+function stopSession() {
+  running = false;
+
+  if (recorder) { try { recorder.stop(); } catch (_) {} recorder = null; }
+  if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+  if (decoderWorker) { decoderWorker.terminate(); decoderWorker = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+
+  inputAnalyser = null;
+  outputAnalyser = null;
+  audioOutput = null;
+
+  setStatus('', 'Ready');
+  startBtn.textContent = 'Start Translating';
+  startBtn.className = 'btn btn-start';
+  startBtn.onclick = startSession;
+}
+</script>
+</body>
+</html>
