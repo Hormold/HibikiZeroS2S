@@ -7,7 +7,10 @@
 # Audio format: PCM16 24kHz mono, base64-encoded in JSON events.
 # Supported client events:
 #   session.update, input_audio_buffer.append, input_audio_buffer.commit,
-#   input_audio_buffer.clear, response.create, response.cancel
+#   input_audio_buffer.clear, output_audio_buffer.clear,
+#   response.create, response.cancel,
+#   conversation.item.create, conversation.item.truncate,
+#   conversation.item.delete, conversation.item.retrieve
 # Emitted server events:
 #   session.created, session.updated, conversation.created,
 #   input_audio_buffer.committed, input_audio_buffer.cleared,
@@ -15,7 +18,7 @@
 #   response.content_part.added, response.audio.delta,
 #   response.audio_transcript.delta, response.audio.done,
 #   response.audio_transcript.done, response.content_part.done,
-#   response.output_item.done, response.done, error
+#   response.output_item.done, response.done, rate_limits.updated, error
 
 import asyncio
 import base64
@@ -132,23 +135,28 @@ class Model:
                 "id": session_id,
                 "object": "realtime.session",
                 "model": "hibiki-zero-3b",
+                "expires_at": 0,
                 "modalities": ["text", "audio"],
                 "instructions": "",
                 "voice": "alloy",
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
                 "input_audio_transcription": None,
+                "input_audio_noise_reduction": None,
                 "turn_detection": {
                     "type": "server_vad",
                     "threshold": 0.5,
                     "prefix_padding_ms": 300,
                     "silence_duration_ms": 200,
                     "create_response": True,
+                    "interrupt_response": True,
                 },
                 "tools": [],
                 "tool_choice": "auto",
                 "temperature": 0.8,
                 "max_response_output_tokens": "inf",
+                "speed": 1.0,
+                "tracing": None,
             }
 
             # --- helpers ---------------------------------------------------
@@ -175,6 +183,7 @@ class Model:
             resp_id: str | None = None
             resp_item_id: str | None = None
             transcript_acc: str = ""
+            resp_metadata: dict | None = None
 
             async def begin_response():
                 nonlocal resp_id, resp_item_id, transcript_acc
@@ -191,7 +200,32 @@ class Model:
                         "status_details": None,
                         "output": [],
                         "usage": None,
+                        "metadata": resp_metadata,
+                        "conversation_id": conv_id,
+                        "modalities": session_cfg["modalities"],
+                        "voice": session_cfg["voice"],
+                        "output_audio_format": session_cfg["output_audio_format"],
+                        "temperature": session_cfg["temperature"],
+                        "max_output_tokens": session_cfg["max_response_output_tokens"],
+                        "speed": session_cfg["speed"],
                     },
+                })
+                await send_event({
+                    "type": "rate_limits.updated",
+                    "rate_limits": [
+                        {
+                            "name": "requests",
+                            "limit": 10000,
+                            "remaining": 9999,
+                            "reset_seconds": 60.0,
+                        },
+                        {
+                            "name": "tokens",
+                            "limit": 2000000,
+                            "remaining": 1999999,
+                            "reset_seconds": 1.0,
+                        },
+                    ],
                 })
                 await send_event({
                     "type": "response.output_item.added",
@@ -224,7 +258,12 @@ class Model:
                     "item_id": resp_item_id,
                     "output_index": 0,
                     "content_index": 0,
-                    "part": {"type": "audio", "transcript": ""},
+                    "part": {
+                        "type": "audio",
+                        "audio": None,
+                        "text": None,
+                        "transcript": None,
+                    },
                 })
 
             async def finish_response(status: str = "completed"):
@@ -256,7 +295,12 @@ class Model:
                     "item_id": iid,
                     "output_index": 0,
                     "content_index": 0,
-                    "part": {"type": "audio", "transcript": transcript_acc},
+                    "part": {
+                        "type": "audio",
+                        "audio": None,
+                        "text": None,
+                        "transcript": transcript_acc,
+                    },
                 })
                 await send_event({
                     "type": "response.output_item.done",
@@ -269,7 +313,12 @@ class Model:
                         "status": status,
                         "role": "assistant",
                         "content": [
-                            {"type": "audio", "transcript": transcript_acc}
+                            {
+                                "type": "audio",
+                                "audio": None,
+                                "text": None,
+                                "transcript": transcript_acc,
+                            }
                         ],
                     },
                 })
@@ -288,10 +337,23 @@ class Model:
                                 "status": status,
                                 "role": "assistant",
                                 "content": [
-                                    {"type": "audio", "transcript": transcript_acc}
+                                    {
+                                        "type": "audio",
+                                        "audio": None,
+                                        "text": None,
+                                        "transcript": transcript_acc,
+                                    }
                                 ],
                             }
                         ],
+                        "metadata": None,
+                        "conversation_id": conv_id,
+                        "modalities": session_cfg["modalities"],
+                        "voice": session_cfg["voice"],
+                        "output_audio_format": session_cfg["output_audio_format"],
+                        "temperature": session_cfg["temperature"],
+                        "max_output_tokens": session_cfg["max_response_output_tokens"],
+                        "speed": session_cfg["speed"],
                         "usage": {
                             "total_tokens": 0,
                             "input_tokens": 0,
@@ -426,9 +488,12 @@ class Model:
                         for key in (
                             "modalities", "instructions", "voice",
                             "input_audio_format", "output_audio_format",
-                            "input_audio_transcription", "turn_detection",
+                            "input_audio_transcription",
+                            "input_audio_noise_reduction",
+                            "turn_detection",
                             "temperature", "max_response_output_tokens",
-                            "tools", "tool_choice",
+                            "tools", "tool_choice", "speed",
+                            "tracing",
                         ):
                             if key in s:
                                 session_cfg[key] = s[key]
@@ -483,17 +548,26 @@ class Model:
                     # ---- response.create -----------------------------------
                     elif etype == "response.create":
                         await finish_response()
+                        resp_opts = event.get("response", {})
+                        resp_metadata = resp_opts.get("metadata")
                         # Future audio will auto-start a new response
 
                     # ---- response.cancel -----------------------------------
                     elif etype == "response.cancel":
+                        # Accepts optional response_id; we only have one
+                        # active response so we cancel it regardless.
                         await finish_response("cancelled")
+
+                    # ---- output_audio_buffer.clear ----------------------------
+                    elif etype == "output_audio_buffer.clear":
+                        pass  # no output buffer; ack silently
 
                     # ---- conversation.item.* (ack but no-op) ---------------
                     elif etype in (
                         "conversation.item.create",
                         "conversation.item.truncate",
                         "conversation.item.delete",
+                        "conversation.item.retrieve",
                     ):
                         pass  # translation model ignores conversation ops
 

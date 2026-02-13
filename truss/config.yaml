@@ -3,7 +3,6 @@ python_version: py311
 
 requirements:
   - moshi>=0.2.13
-  - sphn
   - sentencepiece
   - numpy
   - fastapi
